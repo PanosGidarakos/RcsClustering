@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.colors import PowerNorm
 
 folder_path = "./data_thes"
 
@@ -177,8 +178,25 @@ else:
 	# 2) Heatmap of mean pollen by allergen and month
 	pivot = seasonality.pivot(index="allergen", columns="month", values="mean_pollen")
 	plt.figure(figsize=(10, max(4, 0.3 * len(pivot.index))))
-	im = plt.imshow(pivot.fillna(0), aspect="auto", interpolation="nearest", cmap="YlOrRd")
-	plt.colorbar(im, label="Mean pollen concentration")
+	heat_data = pivot.fillna(0).to_numpy()
+	if np.any(heat_data > 0):
+		max_val = float(heat_data.max())
+		norm = PowerNorm(gamma=0.4, vmin=0, vmax=max_val)
+		im = plt.imshow(
+			heat_data,
+			aspect="auto",
+			interpolation="nearest",
+			cmap="inferno",
+			norm=norm,
+		)
+	else:
+		im = plt.imshow(
+			heat_data,
+			aspect="auto",
+			interpolation="nearest",
+			cmap="inferno",
+		)
+	plt.colorbar(im, label="Mean pollen concentration (enhanced scale)")
 	plt.yticks(range(len(pivot.index)), pivot.index)
 	plt.xticks(range(len(pivot.columns)), pivot.columns)
 	plt.xlabel("Month")
