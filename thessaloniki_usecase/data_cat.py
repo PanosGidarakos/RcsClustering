@@ -47,7 +47,7 @@ if date_col is None:
 			converted = pd.to_datetime(data[col], errors="coerce")
 		except Exception:
 			continue
-		if converted.notna().sum() > 0.2 * len(converted):
+		if converted.notna().sum() > 0.8 * len(converted):
 			data[col] = converted
 			date_col = col
 			break
