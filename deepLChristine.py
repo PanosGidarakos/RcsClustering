@@ -6,7 +6,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, accuracy_score
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import make_pipeline
+from sklearn.decomposition import PCA
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -344,7 +348,73 @@ def plot_training_history(history):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 7. MAIN – RUN EVERYTHING STEP BY STEP
+# 7. BASELINE MODELS: SVM & MLP
+# ──────────────────────────────────────────────────────────────────────
+
+def train_svm(X_train, y_train_enc, X_test, y_test_enc, label_encoder):
+    """Train an SVM with RBF kernel + PCA dimensionality reduction."""
+    print("\n" + "=" * 60)
+    print("SVM BASELINE (RBF kernel + PCA)")
+    print("=" * 60)
+    # PCA to reduce 1388 features — keeps 95% variance
+    svm_pipe = make_pipeline(
+        PCA(n_components=0.95),
+        SVC(kernel="rbf", C=10, gamma="scale", decision_function_shape="ovo")
+    )
+    svm_pipe.fit(X_train, y_train_enc)
+    preds = svm_pipe.predict(X_test)
+    acc = accuracy_score(y_test_enc, preds)
+    n_components = svm_pipe[0].n_components_
+    print(f"PCA reduced {X_train.shape[1]} → {n_components} features")
+    print(f"SVM Test Accuracy: {acc:.3f}")
+    labels = label_encoder.classes_
+    print(classification_report(y_test_enc, preds, target_names=labels, zero_division=0))
+    return acc, preds
+
+
+def train_mlp(X_train, y_train_enc, X_val, y_val_enc, X_test, y_test_enc, label_encoder):
+    """Train a scikit-learn MLP classifier."""
+    print("\n" + "=" * 60)
+    print("MLP BASELINE (scikit-learn)")
+    print("=" * 60)
+    mlp = MLPClassifier(
+        hidden_layer_sizes=(256, 128, 64),
+        activation="relu",
+        solver="adam",
+        max_iter=1000,
+        early_stopping=True,
+        validation_fraction=0.15,
+        learning_rate="adaptive",
+        learning_rate_init=1e-3,
+        random_state=42,
+    )
+    # Combine train+val for sklearn (it does its own internal early-stopping split)
+    X_fit = np.vstack([X_train, X_val])
+    y_fit = np.concatenate([y_train_enc, y_val_enc])
+    mlp.fit(X_fit, y_fit)
+    preds = mlp.predict(X_test)
+    acc = accuracy_score(y_test_enc, preds)
+    print(f"MLP Test Accuracy: {acc:.3f}")
+    labels = label_encoder.classes_
+    print(classification_report(y_test_enc, preds, target_names=labels, zero_division=0))
+    return acc, preds
+
+
+def print_comparison(results):
+    """Print a summary table comparing all models."""
+    print("\n" + "=" * 60)
+    print("MODEL COMPARISON SUMMARY")
+    print("=" * 60)
+    print(f"{'Model':<20} {'Test Accuracy':>15}")
+    print("-" * 37)
+    for name, acc in sorted(results.items(), key=lambda x: -x[1]):
+        bar = "█" * int(acc * 30)
+        print(f"{name:<20} {acc:>13.1%}  {bar}")
+    print()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 8. MAIN – RUN EVERYTHING STEP BY STEP
 # ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -404,10 +474,22 @@ if __name__ == "__main__":
 
     print("\nTraining...")
     model, history = train_model(model, train_loader, val_loader,
-                                  num_epochs=150, lr=1e-3, device=device)
+                                  num_epochs=400, lr=1e-3, device=device)
 
     # ── Step 9: Plot training history ──
     plot_training_history(history)
 
-    # ── Step 10: Evaluate on test set ──
+    # ── Step 10: Evaluate CNN on test set ──
     true_labels, pred_labels = evaluate_model(model, test_loader, le, device=device)
+    cnn_acc = accuracy_score(true_labels, pred_labels)
+
+    # ── Step 11: SVM baseline ──
+    X_train_all = np.vstack([X_train, X_val])  # SVM uses train+val
+    y_train_all = np.concatenate([y_train_enc, y_val_enc])
+    svm_acc, _ = train_svm(X_train_all, y_train_all, X_test, y_test_enc, le)
+
+    # ── Step 12: MLP baseline ──
+    mlp_acc, _ = train_mlp(X_train, y_train_enc, X_val, y_val_enc, X_test, y_test_enc, le)
+
+    # ── Step 13: Comparison ──
+    print_comparison({"1D-CNN": cnn_acc, "SVM (RBF+PCA)": svm_acc, "MLP (sklearn)": mlp_acc})
