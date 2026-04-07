@@ -1,12 +1,13 @@
+"""
+Pollen classifier for average_data — 12 species, ~5 samples each.
+Same pipeline as deepLChristine.py adapted for this dataset.
+"""
 import os
-import re
-import json
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, accuracy_score
+from sklearn.metrics import classification_report, accuracy_score
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
 from sklearn.neighbors import KNeighborsClassifier
@@ -17,55 +18,80 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
+N_PCA = 6  # number of PCA components (set to None for 95% variance)
+
 # ──────────────────────────────────────────────────────────────────────
 # 1. DATA LOADING
 # ──────────────────────────────────────────────────────────────────────
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "Christines")
-MAPPING_FILE = os.path.join(os.path.dirname(__file__), "mapping.json")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "average_data")
 
-# Regex to match standard files: XX_YYYV_Z.txt
-FILE_PATTERN = re.compile(r"^(\d+)_(\d+)V_(\d+)\.txt$")
-
-with open(MAPPING_FILE) as f:
-    POLLEN_MAP = json.load(f)  # str->str, e.g. "2" -> "fagus"
+# Map folder names to species labels
+FOLDER_TO_SPECIES = {
+    "average_carpinus":       "carpinus_betulus",
+    "average_cedrus@85V_2":   "cedrus_85V",
+    "average_cedrus@8V":      "cedrus_8V",
+    "average_mimosa":         "mimosa",
+    "average_olea":           "olea_europea",
+    "average_parietaria":     "parietaria",
+    "average_planteago":      "plantago_lanceolata",
+    "average_quercus_robur":  "quercus_robur",
+    "average_salix":          "salix_caprea",
+    "average_salsola_kali":   "salsola_kali",
+    "castanea_average":       "castanea_sativa",
+    "cypressus_average":      "cypressus_arizonica",
+}
 
 
 def load_single_file(filepath):
     """Load a single spectrum file. Returns (wavelengths, intensities) arrays."""
     data = np.loadtxt(filepath)
-    return data[:, 0], data[:, 1]
+    return data[:, 0][391:1786], data[:, 1][391:1786]
 
 
 def load_all_spectra(data_dir=DATA_DIR):
     """
-    Load all standard-named spectra from the Christines folder.
-    Returns a list of dicts: {pollen_id, voltage, sample_num, species, wavelengths, intensities, filename}
+    Load all spectra from the average_data subfolders.
+    Skips .png files and tot_average_data files.
+    Returns a list of dicts with species, wavelengths, intensities, filename.
     """
     records = []
-    for fname in sorted(os.listdir(data_dir)):
-        m = FILE_PATTERN.match(fname)
-        if not m:
+    for folder_name in sorted(os.listdir(data_dir)):
+        folder_path = os.path.join(data_dir, folder_name)
+        if not os.path.isdir(folder_path):
             continue
-        pollen_id = m.group(1).lstrip("0") or "0"
-        voltage = int(m.group(2))
-        sample_num = int(m.group(3))
-        species = POLLEN_MAP.get(pollen_id, f"unknown_{pollen_id}")
-        wl, intensity = load_single_file(os.path.join(data_dir, fname))
-        records.append({
-            "pollen_id": pollen_id,
-            "voltage": voltage,
-            "sample_num": sample_num,
-            "species": species,
-            "wavelengths": wl,
-            "intensities": intensity,
-            "filename": fname,
-        })
+        species = FOLDER_TO_SPECIES.get(folder_name)
+        if species is None:
+            print(f"  Warning: unknown folder '{folder_name}', skipping")
+            continue
+
+        sample_num = 0
+        for fname in sorted(os.listdir(folder_path)):
+            # Skip images and the tot_average_data file
+            if fname.endswith(".png") or fname.startswith("tot_average"):
+                continue
+            fpath = os.path.join(folder_path, fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                wl, intensity = load_single_file(fpath)
+            except Exception as e:
+                print(f"  Warning: could not load {fpath}: {e}")
+                continue
+            sample_num += 1
+            records.append({
+                "species": species,
+                "sample_num": sample_num,
+                "wavelengths": wl,
+                "intensities": intensity,
+                "filename": fname,
+                "folder": folder_name,
+            })
     return records
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 2. PLOTTING RAW DATA
+# 2. PLOTTING
 # ──────────────────────────────────────────────────────────────────────
 
 def plot_raw_spectrum(record):
@@ -74,7 +100,7 @@ def plot_raw_spectrum(record):
     plt.plot(record["wavelengths"], record["intensities"], linewidth=0.5)
     plt.xlabel("Wavelength (nm)")
     plt.ylabel("Intensity")
-    plt.title(f"Raw spectrum – {record['species']} (file: {record['filename']})")
+    plt.title(f"Raw spectrum – {record['species']} ({record['filename']})")
     plt.tight_layout()
     plt.show()
 
@@ -97,21 +123,6 @@ def plot_all_samples_for_species(records, species_name):
     plt.show()
 
 
-# ──────────────────────────────────────────────────────────────────────
-# 3. PREPROCESSING: Savitzky-Golay + MinMax Scaling
-# ──────────────────────────────────────────────────────────────────────
-
-def preprocess_spectrum(intensities, sg_window=15, sg_polyorder=3):
-    """
-    Apply Savitzky-Golay smoothing, then Min-Max scale to [0, 1].
-    Returns (smoothed, scaled) arrays.
-    """
-    smoothed = savgol_filter(intensities, window_length=sg_window, polyorder=sg_polyorder)
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(smoothed.reshape(-1, 1)).ravel()
-    return smoothed, scaled
-
-
 def plot_preprocessing_comparison(record, sg_window=15, sg_polyorder=3):
     """Show raw vs smoothed vs scaled for a single record."""
     wl = record["wavelengths"]
@@ -119,7 +130,6 @@ def plot_preprocessing_comparison(record, sg_window=15, sg_polyorder=3):
     smoothed, scaled = preprocess_spectrum(raw, sg_window, sg_polyorder)
 
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-
     axes[0].plot(wl, raw, linewidth=0.5, color="gray")
     axes[0].set_title(f"Raw – {record['species']} ({record['filename']})")
     axes[0].set_ylabel("Intensity")
@@ -138,39 +148,43 @@ def plot_preprocessing_comparison(record, sg_window=15, sg_polyorder=3):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 4. PREPARE DATASET FOR CLASSIFICATION
+# 3. PREPROCESSING
+# ──────────────────────────────────────────────────────────────────────
+
+def preprocess_spectrum(intensities, sg_window=15, sg_polyorder=3):
+    """Savitzky-Golay smoothing + Min-Max scale to [0, 1]."""
+    smoothed = savgol_filter(intensities, window_length=sg_window, polyorder=sg_polyorder)
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(smoothed.reshape(-1, 1)).ravel()
+    return smoothed, scaled
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 4. DATASET BUILDING & SPLITTING
 # ──────────────────────────────────────────────────────────────────────
 
 def build_dataset(records, sg_window=15, sg_polyorder=3):
-    """
-    Preprocess all records and return:
-      X: np.array of shape (N, 1388) – scaled spectra
-      y: np.array of species labels (strings)
-      groups: list of (pollen_id, sample_num) for group-aware splitting
-    """
-    X, y, groups = [], [], []
+    """Preprocess all records → (X, y) arrays."""
+    X, y = [], []
     for r in records:
         _, scaled = preprocess_spectrum(r["intensities"], sg_window, sg_polyorder)
         X.append(scaled)
         y.append(r["species"])
-        groups.append((r["pollen_id"], r["sample_num"]))
-    return np.array(X), np.array(y), groups
+    return np.array(X), np.array(y)
 
 
 def train_val_test_split(records):
     """
-    Split per species: for each pollen_id, sort samples by sample_num,
-    use the first 3 for training, next 1 for validation, last 1 for test.
-    Species with fewer than 3 samples get all samples in training.
-    Returns (train_records, val_records, test_records).
+    Per species: sort by sample_num, first 3 → train, 4th → val, 5th → test.
+    Species with 4 samples: 2 train, 1 val, 1 test.
     """
     from collections import defaultdict
-    by_pollen = defaultdict(list)
+    by_species = defaultdict(list)
     for r in records:
-        by_pollen[r["pollen_id"]].append(r)
+        by_species[r["species"]].append(r)
 
     train, val, test = [], [], []
-    for pid, samples in by_pollen.items():
+    for species, samples in sorted(by_species.items()):
         samples_sorted = sorted(samples, key=lambda x: x["sample_num"])
         n = len(samples_sorted)
         if n >= 5:
@@ -191,11 +205,11 @@ def train_val_test_split(records):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 5. 1D CNN MODEL
+# 5. MODELS
 # ──────────────────────────────────────────────────────────────────────
 
 class SpectrumCNN(nn.Module):
-    """Compact 1D CNN for spectral classification."""
+    """1D CNN for spectral classification."""
     def __init__(self, input_length, num_classes):
         super().__init__()
         self.features = nn.Sequential(
@@ -223,14 +237,13 @@ class SpectrumCNN(nn.Module):
         )
 
     def forward(self, x):
-        # x: (batch, 1, length)
         x = self.features(x)
-        x = x.squeeze(-1)  # (batch, 128)
+        x = x.squeeze(-1)
         return self.classifier(x)
 
 
 class SpectrumFC(nn.Module):
-    """Small fully-connected network for PCA-reduced spectral features."""
+    """Small FC network for PCA-reduced features."""
     def __init__(self, input_dim, num_classes):
         super().__init__()
         self.classifier = nn.Sequential(
@@ -254,21 +267,20 @@ class SpectrumFC(nn.Module):
 # ──────────────────────────────────────────────────────────────────────
 
 def make_tensors(X, y_encoded, add_channel=True):
-    """Convert numpy arrays to PyTorch tensors. Adds channel dim for CNN if add_channel=True."""
+    """Convert numpy arrays to PyTorch tensors."""
     X_t = torch.tensor(X, dtype=torch.float32)
     if add_channel:
-        X_t = X_t.unsqueeze(1)  # (N, 1, L)
+        X_t = X_t.unsqueeze(1)
     y_t = torch.tensor(y_encoded, dtype=torch.long)
     return X_t, y_t
 
 
 def mixup_batch(xb, yb, num_classes, alpha=0.4):
-    """Mixup: interpolate between random pairs to create virtual training samples."""
+    """Mixup augmentation."""
     lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
     batch_size = xb.size(0)
     index = torch.randperm(batch_size, device=xb.device)
     mixed_x = lam * xb + (1 - lam) * xb[index]
-    # Soft labels: blend one-hot vectors
     y_onehot = torch.zeros(batch_size, num_classes, device=xb.device)
     y_onehot.scatter_(1, yb.unsqueeze(1), 1.0)
     y_onehot2 = torch.zeros(batch_size, num_classes, device=xb.device)
@@ -279,6 +291,7 @@ def mixup_batch(xb, yb, num_classes, alpha=0.4):
 
 def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3,
                 device="cpu", use_mixup=True, label_smoothing=0.1):
+    """Train with Adam + cosine annealing + optional mixup."""
     model.to(device)
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     criterion_soft = nn.KLDivLoss(reduction="batchmean")
@@ -291,19 +304,16 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3,
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
 
     for epoch in range(num_epochs):
-        # ── Train ──
         model.train()
         running_loss, correct, total = 0.0, 0, 0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-
             if use_mixup:
                 mixed_x, mixed_y = mixup_batch(xb, yb, num_classes)
                 out = model(mixed_x)
                 log_probs = torch.log_softmax(out, dim=1)
                 loss = criterion_soft(log_probs, mixed_y)
-                # Accuracy on original (unmixed) labels for tracking
                 with torch.no_grad():
                     out_clean = model(xb)
                     correct += (out_clean.argmax(1) == yb).sum().item()
@@ -311,7 +321,6 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3,
                 out = model(xb)
                 loss = criterion(out, yb)
                 correct += (out.argmax(1) == yb).sum().item()
-
             loss.backward()
             optimizer.step()
             running_loss += loss.item() * xb.size(0)
@@ -320,7 +329,6 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3,
         train_acc = correct / total
         scheduler.step(epoch)
 
-        # ── Validate ──
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
         with torch.no_grad():
@@ -351,9 +359,10 @@ def train_model(model, train_loader, val_loader, num_epochs=100, lr=1e-3,
         model.load_state_dict(best_state)
     return model, history
 
+
 def train_model_lbfgs(model, X_train, y_train, X_val, y_val,
                       num_epochs=300, lr=1.0, weight_decay=1e-3, device="cpu"):
-    """Full-batch LBFGS training — matches sklearn's MLP solver for small datasets."""
+    """Full-batch LBFGS training for small FC models."""
     model.to(device)
     X_train = X_train.to(device)
     y_train = y_train.to(device)
@@ -376,7 +385,6 @@ def train_model_lbfgs(model, X_train, y_train, X_val, y_val,
             optimizer.zero_grad()
             out = model(X_train)
             loss = criterion(out, y_train)
-            # L2 regularization
             l2 = sum(p.pow(2).sum() for p in model.parameters())
             loss = loss + weight_decay * l2
             loss.backward()
@@ -385,13 +393,11 @@ def train_model_lbfgs(model, X_train, y_train, X_val, y_val,
 
         optimizer.step(closure)
 
-        # Track metrics
         model.eval()
         with torch.no_grad():
             train_out = model(X_train)
             train_acc = (train_out.argmax(1) == y_train).float().mean().item()
             train_loss = loss_val[0]
-
             val_out = model(X_val)
             val_loss = criterion(val_out, y_val).item()
             val_acc = (val_out.argmax(1) == y_val).float().mean().item()
@@ -416,6 +422,7 @@ def train_model_lbfgs(model, X_train, y_train, X_val, y_val,
 
 
 def evaluate_model(model, test_loader, label_encoder, device="cpu"):
+    """Evaluate and print classification report."""
     model.eval()
     all_preds, all_true = [], []
     with torch.no_grad():
@@ -432,15 +439,6 @@ def evaluate_model(model, test_loader, label_encoder, device="cpu"):
     print("TEST SET RESULTS")
     print("=" * 60)
     print(classification_report(all_true, all_preds, target_names=labels, zero_division=0))
-
-    cm = confusion_matrix(all_true, all_preds)
-    fig, ax = plt.subplots(figsize=(max(8, len(labels)), max(6, len(labels) * 0.6)))
-    disp = ConfusionMatrixDisplay(cm, display_labels=labels)
-    disp.plot(ax=ax, xticks_rotation=90, cmap="Blues", values_format="d")
-    plt.title("Confusion Matrix – Test Set")
-    plt.tight_layout()
-    plt.show()
-
     return all_true, all_preds
 
 
@@ -451,36 +449,32 @@ def plot_training_history(history):
     ax1.set_title("Loss")
     ax1.set_xlabel("Epoch")
     ax1.legend()
-
     ax2.plot(history["train_acc"], label="Train")
     ax2.plot(history["val_acc"], label="Val")
     ax2.set_title("Accuracy")
     ax2.set_xlabel("Epoch")
     ax2.legend()
-
     plt.tight_layout()
     plt.show()
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 7. BASELINE MODELS: SVM & MLP
+# 7. BASELINE MODELS
 # ──────────────────────────────────────────────────────────────────────
 
 def train_svm(X_train, y_train_enc, X_test, y_test_enc, label_encoder):
-    """Train an SVM with RBF kernel + PCA dimensionality reduction."""
     print("\n" + "=" * 60)
     print("SVM BASELINE (RBF kernel + PCA)")
     print("=" * 60)
-    # PCA to reduce 1388 features — keeps 95% variance
     svm_pipe = make_pipeline(
-        PCA(n_components=0.95),
+        PCA(n_components=N_PCA if N_PCA else 0.95),
         SVC(kernel="rbf", C=10, gamma="scale", decision_function_shape="ovo")
     )
     svm_pipe.fit(X_train, y_train_enc)
     preds = svm_pipe.predict(X_test)
     acc = accuracy_score(y_test_enc, preds)
-    n_components = svm_pipe[0].n_components_
-    print(f"PCA reduced {X_train.shape[1]} → {n_components} features")
+    n_comp = svm_pipe[0].n_components_
+    print(f"PCA reduced {X_train.shape[1]} → {n_comp} features")
     print(f"SVM Test Accuracy: {acc:.3f}")
     labels = label_encoder.classes_
     print(classification_report(y_test_enc, preds, target_names=labels, zero_division=0))
@@ -488,12 +482,11 @@ def train_svm(X_train, y_train_enc, X_test, y_test_enc, label_encoder):
 
 
 def train_mlp(X_train, y_train_enc, X_val, y_val_enc, X_test, y_test_enc, label_encoder):
-    """Train a scikit-learn MLP classifier."""
     print("\n" + "=" * 60)
     print("MLP BASELINE (scikit-learn)")
     print("=" * 60)
     mlp = make_pipeline(
-        PCA(n_components=0.95),
+        PCA(n_components=N_PCA if N_PCA else 0.95),
         MLPClassifier(
             hidden_layer_sizes=(32,),
             activation="relu",
@@ -503,7 +496,6 @@ def train_mlp(X_train, y_train_enc, X_val, y_val_enc, X_test, y_test_enc, label_
             random_state=42,
         )
     )
-    # Combine train+val for sklearn
     X_fit = np.vstack([X_train, X_val])
     y_fit = np.concatenate([y_train_enc, y_val_enc])
     mlp.fit(X_fit, y_fit)
@@ -516,12 +508,11 @@ def train_mlp(X_train, y_train_enc, X_val, y_val_enc, X_test, y_test_enc, label_
 
 
 def train_knn(X_train, y_train_enc, X_test, y_test_enc, label_encoder):
-    """Train a KNN classifier with PCA."""
     print("\n" + "=" * 60)
     print("KNN BASELINE (k=3 + PCA)")
     print("=" * 60)
     knn_pipe = make_pipeline(
-        PCA(n_components=0.95),
+        PCA(n_components=N_PCA if N_PCA else 0.95),
         KNeighborsClassifier(n_neighbors=3, weights="distance", metric="euclidean")
     )
     knn_pipe.fit(X_train, y_train_enc)
@@ -534,7 +525,6 @@ def train_knn(X_train, y_train_enc, X_test, y_test_enc, label_encoder):
 
 
 def print_comparison(results):
-    """Print a summary table comparing all models."""
     print("\n" + "=" * 60)
     print("MODEL COMPARISON SUMMARY")
     print("=" * 60)
@@ -547,45 +537,28 @@ def print_comparison(results):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 9. LEAVE-ONE-GROUP-OUT CROSS-VALIDATION
+# 8. LEAVE-ONE-OUT CROSS-VALIDATION
 # ──────────────────────────────────────────────────────────────────────
 
 def cross_validate_svm(records, sg_window=15, sg_polyorder=3):
-    """
-    Leave-one-sample-out CV per pollen_id.
-    For each pollen_id, each sample is held out once as test.
-    Only species with >= 3 samples are included.
-    """
-    from collections import defaultdict
+    """Leave-one-sample-out CV with SVM."""
     print("\n" + "=" * 60)
     print("LEAVE-ONE-OUT CROSS-VALIDATION (SVM)")
     print("=" * 60)
 
-    # Group records by pollen_id
-    by_pollen = defaultdict(list)
+    X_all, y_all = [], []
     for r in records:
-        by_pollen[r["pollen_id"]].append(r)
-
-    # Filter species with >= 3 samples
-    valid_pids = {pid for pid, recs in by_pollen.items() if len(recs) >= 3}
-    filtered = [r for r in records if r["pollen_id"] in valid_pids]
-    print(f"Using {len(filtered)} samples from {len(valid_pids)} species (>= 3 samples each)")
-
-    # Build full dataset
-    X_all, y_all, pids_all = [], [], []
-    for r in filtered:
         _, scaled = preprocess_spectrum(r["intensities"], sg_window, sg_polyorder)
         X_all.append(scaled)
         y_all.append(r["species"])
-        pids_all.append(r["pollen_id"])
     X_all = np.array(X_all)
     y_all = np.array(y_all)
-    pids_all = np.array(pids_all)
 
     le = LabelEncoder()
     y_enc = le.fit_transform(y_all)
 
-    # Leave-one-out per pollen: for each sample, train on all others
+    print(f"Using {len(X_all)} samples from {len(le.classes_)} species")
+
     all_true, all_pred = [], []
     n = len(X_all)
     for i in range(n):
@@ -595,7 +568,7 @@ def cross_validate_svm(records, sg_window=15, sg_polyorder=3):
         y_test = y_enc[i:i+1]
 
         svm_pipe = make_pipeline(
-            PCA(n_components=0.95),
+            PCA(n_components=N_PCA if N_PCA else 0.95),
             SVC(kernel="rbf", C=10, gamma="scale", decision_function_shape="ovo")
         )
         svm_pipe.fit(X_train, y_train)
@@ -610,49 +583,48 @@ def cross_validate_svm(records, sg_window=15, sg_polyorder=3):
     print(f"\nLOO-CV Accuracy: {acc:.3f} ({int(acc * n)}/{n} correct)")
     print(classification_report(all_true, all_pred, target_names=le.classes_, zero_division=0))
 
-    # Per-species accuracy
     print("Per-species accuracy:")
     for cls_idx, cls_name in enumerate(le.classes_):
         mask = all_true == cls_idx
         if mask.sum() > 0:
             cls_acc = (all_pred[mask] == cls_idx).sum() / mask.sum()
-            print(f"  {cls_name:<35} {cls_acc:.0%} ({(all_pred[mask] == cls_idx).sum()}/{mask.sum()})")
+            print(f"  {cls_name:<25} {cls_acc:.0%} ({(all_pred[mask] == cls_idx).sum()}/{mask.sum()})")
 
     return acc
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 8. MAIN – RUN EVERYTHING STEP BY STEP
+# MAIN
 # ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     # ── Step 1: Load all data ──
-    print("Loading data...")
+    print("Loading data from average_data/...")
     all_records = load_all_spectra()
-    print(f"Loaded {len(all_records)} spectra from "
-          f"{len(set(r['pollen_id'] for r in all_records))} pollen types")
+    print(f"Total records loaded: {len(all_records)}")
+    print(all_records)
+    species_set = sorted(set(r["species"] for r in all_records))
+    print(f"Loaded {len(all_records)} spectra from {len(species_set)} species")
+    for sp in species_set:
+        count = sum(1 for r in all_records if r["species"] == sp)
+        print(f"  {sp:<25} {count} samples")
 
-    # ── Step 2: Plot a raw spectrum (fagus, sample 1) ──
-    fagus_records = [r for r in all_records if r["species"] == "fagus"]
-    print(f"\nFagus has {len(fagus_records)} samples")
-    plot_raw_spectrum(fagus_records[0])
+    # ── Step 2: Plot one example ──
+    first_species = species_set[0]
+    first_rec = [r for r in all_records if r["species"] == first_species][0]
+    plot_raw_spectrum(first_rec)
+    plot_all_samples_for_species(all_records, first_species)
+    plot_preprocessing_comparison(first_rec)
 
-    # ── Step 3: Plot all fagus samples overlaid ──
-    plot_all_samples_for_species(all_records, "fagus")
-
-    # ── Step 4: Show preprocessing comparison ──
-    plot_preprocessing_comparison(fagus_records[0])
-
-    # ── Step 5: Split data into train/val/test ──
+    # ── Step 3: Split ──
     train_recs, val_recs, test_recs = train_val_test_split(all_records)
     print(f"\nSplit: {len(train_recs)} train, {len(val_recs)} val, {len(test_recs)} test")
 
-    # ── Step 6: Build preprocessed arrays ──
-    X_train, y_train, _ = build_dataset(train_recs)
-    X_val, y_val, _ = build_dataset(val_recs)
-    X_test, y_test, _ = build_dataset(test_recs)
+    # ── Step 4: Build preprocessed arrays ──
+    X_train, y_train = build_dataset(train_recs)
+    X_val, y_val = build_dataset(val_recs)
+    X_test, y_test = build_dataset(test_recs)
 
-    # Encode labels
     le = LabelEncoder()
     le.fit(np.concatenate([y_train, y_val, y_test]))
     y_train_enc = le.transform(y_train)
@@ -664,31 +636,30 @@ if __name__ == "__main__":
     print(f"Classes: {num_classes}, Input length: {input_length}")
     print(f"Species: {list(le.classes_)}")
 
-    # ── Step 7: Prepare data for both models ──
+    # ── Step 5: Prepare data ──
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"\nUsing device: {device}")
 
     X_cnn_train = np.vstack([X_train, X_val])
     y_cnn_train = np.concatenate([y_train_enc, y_val_enc])
 
-    # --- 7a: CNN on raw spectra ---
+    # CNN data
     X_cnn_t, y_cnn_t = make_tensors(X_cnn_train, y_cnn_train, add_channel=True)
     X_test_t, y_test_t = make_tensors(X_test, y_test_enc, add_channel=True)
     cnn_train_loader = DataLoader(TensorDataset(X_cnn_t, y_cnn_t), batch_size=16, shuffle=True)
     cnn_test_loader = DataLoader(TensorDataset(X_test_t, y_test_t), batch_size=32)
 
-    # --- 7b: FC on PCA-reduced features ---
-    pca_fc = PCA(n_components=0.95)
+    # FC+PCA data
+    pca_fc = PCA(n_components=N_PCA if N_PCA else 0.95)
     X_fc_train = pca_fc.fit_transform(X_cnn_train)
     X_fc_test = pca_fc.transform(X_test)
     n_pca = X_fc_train.shape[1]
     print(f"PCA for FC model: {X_train.shape[1]} → {n_pca} features")
     X_fc_t, y_fc_t = make_tensors(X_fc_train, y_cnn_train, add_channel=False)
     X_fc_test_t, y_fc_test_t = make_tensors(X_fc_test, y_test_enc, add_channel=False)
-    fc_train_loader = DataLoader(TensorDataset(X_fc_t, y_fc_t), batch_size=16, shuffle=True)
     fc_test_loader = DataLoader(TensorDataset(X_fc_test_t, y_fc_test_t), batch_size=32)
 
-    # ── Step 8a: Train the CNN ──
+    # ── Step 6a: Train CNN ──
     model_cnn = SpectrumCNN(input_length, num_classes)
     print(f"\nCNN parameters: {sum(p.numel() for p in model_cnn.parameters()):,}")
     print("Training CNN (mixup + label smoothing + cosine annealing)...")
@@ -699,11 +670,10 @@ if __name__ == "__main__":
     true_labels, pred_labels = evaluate_model(model_cnn, cnn_test_loader, le, device=device)
     cnn_acc = accuracy_score(true_labels, pred_labels)
 
-    # ── Step 8b: Train the FC (deep learning + PCA + LBFGS) ──
+    # ── Step 6b: Train FC+PCA (LBFGS) ──
     model_fc = SpectrumFC(n_pca, num_classes)
     print(f"\nFC parameters: {sum(p.numel() for p in model_fc.parameters()):,}")
-    print("Training FC+PCA (LBFGS, full-batch, label smoothing)...")
-    # LBFGS runs on CPU (tiny model, full-batch — faster than MPS overhead)
+    print("Training FC+PCA (LBFGS, full-batch)...")
     model_fc, history_fc = train_model_lbfgs(
         model_fc, X_fc_t, y_fc_t, X_fc_test_t, y_fc_test_t,
         num_epochs=300, lr=1.0, weight_decay=1e-3, device="cpu"
@@ -712,18 +682,18 @@ if __name__ == "__main__":
     true_labels_fc, pred_labels_fc = evaluate_model(model_fc, fc_test_loader, le, device="cpu")
     fc_acc = accuracy_score(true_labels_fc, pred_labels_fc)
 
-    # ── Step 11: SVM baseline ──
-    X_train_all = np.vstack([X_train, X_val])  # SVM uses train+val
+    # ── Step 7: SVM baseline ──
+    X_train_all = np.vstack([X_train, X_val])
     y_train_all = np.concatenate([y_train_enc, y_val_enc])
     svm_acc, _ = train_svm(X_train_all, y_train_all, X_test, y_test_enc, le)
 
-    # ── Step 12: MLP baseline ──
+    # ── Step 8: MLP baseline ──
     mlp_acc, _ = train_mlp(X_train, y_train_enc, X_val, y_val_enc, X_test, y_test_enc, le)
 
-    # ── Step 13: KNN baseline ──
+    # ── Step 9: KNN baseline ──
     knn_acc, _ = train_knn(X_train_all, y_train_all, X_test, y_test_enc, le)
 
-    # ── Step 14: Comparison (fixed split) ──
+    # ── Step 10: Comparison ──
     print_comparison({
         "1D-CNN": cnn_acc,
         "FC+PCA (PyTorch)": fc_acc,
@@ -732,5 +702,5 @@ if __name__ == "__main__":
         "KNN (k=3+PCA)": knn_acc,
     })
 
-    # ── Step 15: Leave-one-out cross-validation ──
+    # ── Step 11: LOO-CV ──
     loo_acc = cross_validate_svm(all_records)
